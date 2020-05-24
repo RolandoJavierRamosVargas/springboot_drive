@@ -1,7 +1,10 @@
 package com.springboot.demo.drive.controllers;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -11,24 +14,25 @@ import java.util.List;
 import java.util.Map;
 
 import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.google.api.client.auth.oauth2.Credential;
@@ -46,7 +50,7 @@ import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.DriveScopes;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
-
+@CrossOrigin(origins = { "http://localhost:3000" })
 @Controller
 public class DriveController {
 
@@ -104,15 +108,18 @@ public class DriveController {
 	}
 
 	@GetMapping( "/oauth" )
-	public String saveAuthorizationCode(HttpServletRequest request) throws Exception {
+	public ResponseEntity<?> saveAuthorizationCode(HttpServletRequest request) throws Exception {
+		Map<String,Object> mapa= new HashMap<>();
 		String code = request.getParameter("code");
 		if (code != null) {
 			saveToken(code);
-
-			return "dashboard.html";
+			mapa.put("mensaje", "Se ha iniciado con exito");
+			return new ResponseEntity<Map<String,Object>>(mapa,HttpStatus.OK);
+//			return "dashboard.html";
 		}
-
-		return "index.html";
+		mapa.put("mensaje", "Hubo un error");
+		return new ResponseEntity<Map<String,Object>>(mapa,HttpStatus.NOT_FOUND);
+//		return "index.html";
 	}
 
 	private void saveToken(String code) throws Exception {
@@ -123,10 +130,11 @@ public class DriveController {
 
 	@PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
 	public ResponseEntity uploadFile(@RequestParam MultipartFile file) throws Exception {
-		// logger.info(String.format("File name '%s' uploaded successfully.",
-		// file.getOriginalFilename()));
+
+		Map<String,Object> resp=new HashMap<>();
 
 		Credential cred = flow.loadCredential(USER_IDENTIFIER_KEY);
+		boolean tokenValid = cred.refreshToken();
 
 		Drive drive = new Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, cred)
 				.setApplicationName("googledrivespringbootexample").build();
@@ -160,13 +168,15 @@ public class DriveController {
 		}
 		// en este punto ya tenemos creado el folder total
 		// upload into folder
-		uploadIntoFolder(file, drive, nombre);
+		String idFile=uploadIntoFolder(file, drive, nombre);
+		
 		
 		//eliminar cualquier imagen puesta en el drive
 		
 		deleteFile(ruta);
-
-		return ResponseEntity.ok().build();
+		resp.put("mensaje","exito");
+		resp.put("idFile", idFile);
+		return new ResponseEntity<Map<String,Object>>(resp,HttpStatus.OK);
 	}
 
 	public String crearFolder(String name, Drive drive, String id) {
@@ -194,13 +204,13 @@ public class DriveController {
 			FileList result = null;
 			try {
 				result = driveService.files().list().setQ("name = '" + name + "'").setSpaces("drive")
-						.setFields("nextPageToken, files(id, name)").setPageToken(pageToken).execute();
+						.setFields("nextPageToken, files(id, name,mimeType)").setPageToken(pageToken).execute();
 			} catch (IOException e) {
 				logger.info("No se encontro el archivo" + e.getMessage().concat(":").concat(e.getCause().toString()));
 			}
 
 			for (File file : result.getFiles()) {
-				System.out.printf("Found file: %s (%s)\n", file.getName(), file.getId());
+				System.out.printf("Found file: %s (%s) (%s) \n", file.getName(), file.getId(),file.getMimeType());
 				id = file.getId();
 			}
 
@@ -215,7 +225,7 @@ public class DriveController {
 
 	}
 
-	public void uploadIntoFolder(MultipartFile file, Drive drive, String id) {
+	public String uploadIntoFolder(MultipartFile file, Drive drive, String id) {
 		String fileName = file.getOriginalFilename();
 		Path rutaArchivo = Paths.get("uploads").resolve(fileName).toAbsolutePath();
 		String contentType = file.getContentType();
@@ -232,7 +242,7 @@ public class DriveController {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
-		logger.info("Filess ID: " + archivo.getId());
+		return archivo.getId();
 
 	}
 	
@@ -260,34 +270,95 @@ public class DriveController {
 	}
 	
 	@DeleteMapping(value = { "/deletefile/{fileId}" }, produces = "application/json")
-	public ResponseEntity<?> deleteFile(@PathVariable(name = "fileId") String fileId) throws Exception {
-		Credential cred = flow.loadCredential(USER_IDENTIFIER_KEY);
+	public ResponseEntity<?> deleteFile(@PathVariable(name = "fileId") String fileId) {
+		Map<String,Object> resp= new HashMap<>();
+		Credential cred;
+		try {
+			cred = flow.loadCredential(USER_IDENTIFIER_KEY);
+			Drive drive = new Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, cred)
+					.setApplicationName("googledrivespringbootexample").build();
+			
+			drive.files().delete(fileId).execute();
+		} catch (IOException e) {
+			resp.put("mensaje", "hubo un error, no se pudo eliminar");
+			return new ResponseEntity<Map<String,Object>>(resp,HttpStatus.INTERNAL_SERVER_ERROR);
+		}
 
-		Drive drive = new Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, cred)
-				.setApplicationName("googledrivespringbootexample").build();
+		
+		resp.put("mensaje", "eliminado exitoso");
 
-		drive.files().delete(fileId).execute();
-
-		return ResponseEntity.ok().build();
+		return new ResponseEntity<Map<String,Object>>(resp,HttpStatus.OK);
 	}
 	
-	
-
-//	@GetMapping(value = { "/createfolder/{folderName}" }, produces = "application/json")
-//	public ResponseEntity<?> createFolder(@PathVariable(name = "folderName") String folder) throws Exception {
-//		Map<String,Object> resp = new HashMap<>();
-//		Credential cred = flow.loadCredential(USER_IDENTIFIER_KEY);
-//
+	///Para un Futuro  , espero alguien logre desarrollarlo 
+//	@GetMapping("/download/{id}")
+//	public ResponseEntity<?> dowloadFile(@PathVariable String id) {
+//	
+//		Credential cred=null;
+//		try {
+//			cred = flow.loadCredential(USER_IDENTIFIER_KEY);
+//		} catch (IOException e1) {
+//			// TODO Auto-generated catch block
+//			e1.printStackTrace();
+//		}
+//		
 //		Drive drive = new Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, cred)
 //				.setApplicationName("googledrivespringbootexample").build();
-//
-//		File file = new File();
-//		file.setName("comelones");
-//		file.setMimeType("application/vnd.google-apps.folder");
-//
-//		drive.files().create(file).execute();
-//
 //		
-//		return new ResponseEntity<Map<String,Object>>(resp,HttpStatus.OK);
+//		Map<String,Object> resp=new HashMap<>();
+//		
+//		String type=searchTypeFile(drive,id);
+//		if(type.equals("notFoundType")){
+//			resp.put("error", "No se encontro el archivo con ese id");
+//			return new ResponseEntity<Map<String,Object>>(resp,HttpStatus.BAD_REQUEST);
+//		}
+//		ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+//		try {
+//			drive.files().get(id).executeMediaAndDownloadTo(outputStream);
+//		} catch (IOException e) {
+//			// TODO Auto-generated catch block
+//			e.printStackTrace();
+//		}
+//		ByteArrayInputStream stream =  new ByteArrayInputStream(outputStream.toByteArray());
+//		String name="a";
+//		InputStreamResource input = new InputStreamResource(stream);
+//		File files = new File();
+//		files.setName("documento");
+//		files.setMimeType(type);
+//		System.out.println("El nombre"+files.getOriginalFilename());
+//		System.out.println("33");
+//		
+//		System.out.println("name"+name);
+//		HttpHeaders headers = new HttpHeaders();
+//		headers.add("Content-Disposition", "attachment; filename=\""+name+"\"");
+//		
+////		return ResponseEntity.ok().headers(headers).body(input);
+//		return new ResponseEntity<String>("hola",HttpStatus.OK);
 //	}
+	
+	public String searchTypeFile(Drive driveService, String identifi) {
+		String id = identifi;
+		String pageToken = null;
+		do {
+			FileList result = null;
+			try {
+				result = driveService.files().list().setFields("files(id,mimeType)").execute();
+			} catch (IOException e) {
+//				logger.info("No se encontro el archivo" + e.getMessage().concat(":").concat(e.getCause().toString()));
+			}
+
+			for (File file : result.getFiles()) {
+				if(id.equals(file.getId())) {
+					
+					System.out.printf("Found file Type: %s (%s) \n", file.getId(),file.getMimeType());
+					return file.getMimeType(); 
+				}
+			}
+
+			pageToken = result.getNextPageToken();
+		} while (pageToken != null);
+
+		return "notFoundType";
+
+	}
 }
